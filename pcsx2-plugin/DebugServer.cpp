@@ -49,6 +49,8 @@ typedef int socket_t;
 #include "MipsStackWalk.h"
 #include "Config.h"
 #include "MTGS.h"
+#include "GS/GS.h"
+#include "GS/GSCapture.h"
 #include "GS/Renderers/Common/GSDevice.h"
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "common/FileSystem.h"
@@ -356,6 +358,50 @@ namespace DebugServer
 		{"select", PadDualshock2::Inputs::PAD_SELECT, false}, {"start", PadDualshock2::Inputs::PAD_START, false},
 		{"l3", PadDualshock2::Inputs::PAD_L3, false}, {"r3", PadDualshock2::Inputs::PAD_R3, false},
 	};
+
+	static bool runOnGsThread(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::seconds(5))
+	{
+		auto done = std::make_shared<std::promise<void>>();
+		auto got = done->get_future();
+		MTGS::RunOnGSThread([fn = std::move(fn), done]() {
+			fn();
+			done->set_value();
+		});
+		return got.wait_for(timeout) == std::future_status::ready;
+	}
+
+	// The file name a command was given ("name": letters, digits, '.', '_' and '-', up to 100), or a stamped default
+	// mcp-<date>-<time>-<ms>; "ext" is added when it does not end with it. Empty when the name is not allowed.
+	static std::string fileName(const std::unordered_map<std::string, JsonValue>& params, const std::string& ext)
+	{
+		std::string name = getStr(params, "name", "");
+		bool nameOk = name.size() <= 100;
+		for (char c : name)
+			nameOk = nameOk && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+									c == '.' || c == '_' || c == '-');
+		if (!nameOk || name == "." || name == "..")
+			return {};
+		if (name.empty())
+		{
+			const auto now = std::chrono::system_clock::now();
+			const std::time_t t = std::chrono::system_clock::to_time_t(now);
+			const int ms = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+			char stamp[32];
+			std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&t));
+			char buf[48];
+			snprintf(buf, sizeof(buf), "mcp-%s-%03d", stamp, ms);
+			name = buf;
+		}
+		if (name.size() < ext.size() || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
+			name += ext;
+		return name;
+	}
+
+	static const char* const FILE_NAME_RULE = "name must be a file name of letters, digits, '.', '_' and '-' (up to 100)";
+
+	// The file the running capture writes to, as this server started it ("" when none did).
+	static std::mutex s_captureLock;
+	static std::string s_capturePath;
 
 	static std::string errorJson(const std::string& message)
 	{
@@ -920,32 +966,9 @@ namespace DebugServer
 		// path. "name" (optional): a file name of letters, digits, '.', '_' and '-'; ".png" is added if missing.
 		else if (cmd == "screenshot")
 		{
-			std::string name = getStr(params, "name", "");
-			bool nameOk = name.size() <= 100;
-			for (char c : name)
-				nameOk = nameOk && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-										c == '.' || c == '_' || c == '-');
-			if (!nameOk || name == "." || name == "..")
-			{
-				j.startObject();
-				j.kv("ok", false);
-				j.kv("error", "name must be a file name of letters, digits, '.', '_' and '-' (up to 100)");
-				j.endObject();
-				return j.str();
-			}
+			const std::string name = fileName(params, ".png");
 			if (name.empty())
-			{
-				const auto now = std::chrono::system_clock::now();
-				const std::time_t t = std::chrono::system_clock::to_time_t(now);
-				const int ms = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
-				char stamp[32];
-				std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&t));
-				char buf[48];
-				snprintf(buf, sizeof(buf), "mcp-%s-%03d", stamp, ms);
-				name = buf;
-			}
-			if (name.size() < 4 || name.compare(name.size() - 4, 4, ".png") != 0)
-				name += ".png";
+				return errorJson(FILE_NAME_RULE);
 
 			if (!MTGS::IsOpen())
 			{
@@ -1116,6 +1139,88 @@ namespace DebugServer
 			j.kv("frame", (int64_t)g_FrameCount);
 			j.endObject();
 		}
+		// ----- CAPTURE -----
+		// "action": start PCSX2's own video capture (through FFmpeg; codec, size and whether sound is recorded come
+		// from its settings) into its videos folder, stop it, or status. Start takes an optional "name" as screenshot
+		// does; the container's extension (the CaptureContainer setting, mp4 by default) is added. Only frames PCSX2
+		// presents are recorded: none while paused, one for each frame advanced.
+		else if (cmd == "capture")
+		{
+			const std::string action = getStr(params, "action", "status");
+			if (action != "start" && action != "stop" && action != "status")
+				return errorJson("action must be start, stop or status");
+			if (action == "start")
+			{
+				const std::string name = fileName(params, "." + EmuConfig.GS.CaptureContainer);
+				if (name.empty())
+					return errorJson(FILE_NAME_RULE);
+				if (!MTGS::IsOpen())
+					return errorJson("no game is running");
+				const std::string path = Path::Combine(EmuFolders::Videos, name);
+				FileSystem::CreateDirectoryPath(EmuFolders::Videos.c_str(), false);
+				// 0 started, 1 a capture already runs, 2 PCSX2 could not start it (its log says why)
+				auto result = std::make_shared<int>(2);
+				if (!runOnGsThread([path, result]() {
+						if (GSCapture::IsCapturing())
+							*result = 1;
+						else if (GSBeginCapture(path))
+							*result = 0;
+					}))
+					return errorJson("the GS thread did not answer within 5 s");
+				if (*result == 1)
+					return errorJson("a capture is already running: stop it first");
+				if (*result == 2)
+					return errorJson("PCSX2 could not start the capture (see its log)");
+				std::lock_guard<std::mutex> lock(s_captureLock);
+				s_capturePath = path;
+			}
+			else if (action == "stop")
+			{
+				// Stopping waits for the encoder to write what it still holds.
+				auto was = std::make_shared<bool>(false);
+				if (!runOnGsThread([was]() {
+						*was = GSCapture::IsCapturing();
+						if (*was)
+							GSEndCapture();
+					}, std::chrono::seconds(30)))
+					return errorJson("the GS thread did not finish the capture within 30 s");
+				if (!*was)
+					return errorJson("no capture is running");
+			}
+			struct State { bool capturing = false; bool video = false; bool audio = false; std::string elapsed; };
+			auto state = std::make_shared<State>();
+			if (!runOnGsThread([state]() {
+					state->capturing = GSCapture::IsCapturing();
+					if (state->capturing)
+					{
+						state->video = GSCapture::IsCapturingVideo();
+						state->audio = GSCapture::IsCapturingAudio();
+						state->elapsed = GSCapture::GetElapsedTime().c_str();
+					}
+				}))
+				return errorJson("the GS thread did not answer within 5 s");
+			// The file is named while it is written, and once more by the first answer after the capture ended
+			std::string path;
+			{
+				std::lock_guard<std::mutex> lock(s_captureLock);
+				path = s_capturePath;
+				if (!state->capturing)
+					s_capturePath.clear();
+			}
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("capturing", state->capturing);
+			if (!path.empty())
+				j.kv("path", path);
+			if (state->capturing)
+			{
+				j.kv("video", state->video);
+				j.kv("audio", state->audio);
+				j.kv("elapsed", state->elapsed);
+			}
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -1132,7 +1237,7 @@ namespace DebugServer
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
 				"is_valid_address", "clear_breakpoints", "screenshot",
-				"controller", "frame_advance", "emulation"
+				"controller", "frame_advance", "emulation", "capture"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();

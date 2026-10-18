@@ -152,7 +152,7 @@ export class DebugServerClient {
     }
   }
 
-  private async send(cmd: Record<string, any>): Promise<any> {
+  private async send(cmd: Record<string, any>, timeoutMs = 10000): Promise<any> {
     if (!this.connected || !this.socket) {
       throw new Error('Not connected to PCSX2 Debug Server');
     }
@@ -171,7 +171,7 @@ export class DebugServerClient {
           this.pendingReject = null;
           reject(new Error(`Command timeout: ${cmd.cmd}`));
         }
-      }, 10000);
+      }, timeoutMs);
     });
   }
 
@@ -402,7 +402,8 @@ export class DebugServerClient {
 
   /** Runs this many frames, then pauses; answers once paused. */
   async frameAdvance(frames: number): Promise<{ before: number; frame: number }> {
-    const resp = await this.send({ cmd: 'frame_advance', frames });
+    // The server waits up to 50 ms a frame plus 5 s for the pause
+    const resp = await this.send({ cmd: 'frame_advance', frames }, frames * 50 + 10000);
     if (!resp.ok) throw new Error(resp.error);
     return { before: resp.frame_before, frame: resp.frame };
   }
@@ -412,5 +413,12 @@ export class DebugServerClient {
     const resp = await this.send({ cmd: 'emulation', action });
     if (!resp.ok) throw new Error(resp.error);
     return { state: resp.state, frame: resp.frame };
+  }
+
+  /** Starts PCSX2's own video capture into its videos folder, stops it (waiting for the encoder), or reports it. */
+  async capture(action: 'start' | 'stop' | 'status', name?: string): Promise<{ capturing: boolean; path?: string; video?: boolean; audio?: boolean; elapsed?: string; frame: number }> {
+    const resp = await this.send(name ? { cmd: 'capture', action, name } : { cmd: 'capture', action }, action === 'stop' ? 35000 : 10000);
+    if (!resp.ok) throw new Error(resp.error);
+    return { capturing: resp.capturing, path: resp.path, video: resp.video, audio: resp.audio, elapsed: resp.elapsed, frame: resp.frame };
   }
 }
