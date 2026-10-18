@@ -1,0 +1,25 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "windows-msvc",
+            "displayName": "Windows, MSVC, Release (PCSX2's prebuilt dependencies in deps/)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_PREFIX_PATH": "${sourceDir}/deps",
+                "QT_BUILD": "ON",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+                "DISABLE_ADVANCE_SIMD": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-msvc",
+            "configurePreset": "windows-msvc",
+            "targets": ["install"]
+        }
+    ]
+}

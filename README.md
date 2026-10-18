@@ -19,6 +19,31 @@
 
 ---
 
+## This fork: one debug server port per PCSX2
+
+Upstream's DebugServer always listens on port 21512, and on Windows it opens the port with `SO_REUSEADDR`, which
+lets several processes listen on one port: with two or more PCSX2 instances running, each connection lands in
+whichever instance Windows picks, without any error. This fork makes the debug server a setting, like PINE:
+
+```ini
+[EmuCore]
+EnableDebugServer = true
+DebugServerPort = 21513
+```
+
+- `EnableDebugServer` (off by default) starts the server; `DebugServerPort` (21512 by default) sets its port. A
+  change applies when a game starts or the settings are reloaded.
+- The port is claimed exclusively (`SO_EXCLUSIVEADDRUSE` on Windows): a second instance on the same port logs
+  `[DebugServer] Failed to bind on port N` instead of sharing it.
+- The MCP server needs no change: `pcsx2_connect` takes `debug_port`.
+- The plugin builds against current PCSX2 (checked with `v2.9.129`).
+
+To build it, run `pcsx2-plugin\prepare.ps1` (it clones PCSX2 at a tag, adds the plugin, applies
+`pcsx2-plugin\pcsx2-integration.patch`, adds a `windows-msvc` CMake preset and unpacks PCSX2's prebuilt Windows
+dependencies), then follow the two commands it prints.
+
+---
+
 ## ⚠️ Repository vs Release — Read This First
 
 > **This git repo does NOT contain the full PCSX2 source code.**

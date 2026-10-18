@@ -34,6 +34,9 @@ namespace DebugServer
 	// Check if server is running
 	bool IsRunning();
 
+	// The port it listens on; 0 while it does not listen (stopped, or the port was taken)
+	int GetPort();
+
 	// Called when a breakpoint is hit — wakes up any waiting step/continue
 	void OnBreakpointHit();
 
