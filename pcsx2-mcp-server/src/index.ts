@@ -552,6 +552,49 @@ server.tool('pcsx2_screenshot', 'Save the picture PCSX2 shows now (paused or run
 );
 
 // ==========================================================
+//  TOOLS: pcsx2_controller / pcsx2_frame_advance / pcsx2_emulation
+// ==========================================================
+const BUTTONS = ['up', 'right', 'down', 'left', 'triangle', 'circle', 'cross', 'square', 'l1', 'l2', 'r1', 'r2', 'select', 'start', 'l3', 'r3'] as const;
+const stick = z.number().int().min(0).max(255).default(127);
+
+server.tool('pcsx2_controller', 'Set the whole DualShock 2 state: the buttons listed are held, every other button is released, sticks 0-255 (127 = centre). It stays until the next call. For exact timing, pause first (pcsx2_emulation) and use pcsx2_frame_advance. For getting somewhere and exploring; a measured result uses an input recording.',
+  { buttons: z.array(z.enum(BUTTONS)).default([]), lx: stick, ly: stick, rx: stick, ry: stick, port: z.number().int().min(0).max(1).default(0) },
+  async ({ buttons, lx, ly, rx, ry, port }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    try {
+      const r = await debugServer!.controller({ port, buttons, lx, ly, rx, ry });
+      const held = r.held.length ? r.held.join(', ') : 'no buttons';
+      return { content: [{ type: 'text' as const, text: `Port ${port}: ${held} held, sticks L(${lx},${ly}) R(${rx},${ry}), at frame ${r.frame}` }] };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+server.tool('pcsx2_frame_advance', 'Run this many frames (1-600), then pause; returns the frame counter before and after. Emulation held by the debugger (pcsx2_pause, a breakpoint) does not advance: pcsx2_continue first.',
+  { frames: z.number().int().min(1).max(600).default(1) },
+  async ({ frames }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    try {
+      const r = await debugServer!.frameAdvance(frames);
+      return { content: [{ type: 'text' as const, text: `Advanced ${frames} frame(s): frame ${r.before} -> ${r.frame}, paused` }] };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+server.tool('pcsx2_emulation', 'Pause or resume emulation as a whole, or report its state and frame counter. This is the emulator pause pcsx2_frame_advance works from; pcsx2_pause is the debugger\'s CPU break.',
+  { action: z.enum(['pause', 'resume', 'status']).default('status') },
+  async ({ action }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    try {
+      const r = await debugServer!.emulation(action);
+      return { content: [{ type: 'text' as const, text: `Emulation ${r.state} at frame ${r.frame}` }] };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+// ==========================================================
 //  PS2Recomp Integration Tools
 // ==========================================================
 server.tool('ps2recomp_lookup_function', 'Search PS2Recomp project for functions by address or name.',

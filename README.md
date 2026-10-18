@@ -40,6 +40,10 @@ DebugServerPort = 21513
 - `pcsx2_screenshot` (debug server command `screenshot`, optional `name`) saves the picture PCSX2 shows now,
   paused or running, as a PNG in its snapshots folder at internal resolution, and returns the file's path, so the
   assistant opens the image only when it needs it. The frame is read on the GS thread and encoded off it.
+- `pcsx2_controller` sets a DualShock 2's whole state (the buttons listed held, the rest released, sticks 0-255),
+  as PCSX2's input recordings apply it; it stays until the next call. `pcsx2_emulation` pauses or resumes emulation
+  as a whole (unlike `pcsx2_pause`, the debugger's CPU break), and `pcsx2_frame_advance` runs N frames from there
+  and pauses again, so input can be set frame by frame. Every answer carries PCSX2's frame counter.
 
 To build it, run `pcsx2-plugin\prepare.ps1` (it clones PCSX2 at a tag, adds the plugin, applies
 `pcsx2-plugin\pcsx2-integration.patch`, adds a `windows-msvc` CMake preset and unpacks PCSX2's prebuilt Windows
