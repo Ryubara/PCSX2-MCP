@@ -54,6 +54,11 @@ typedef int socket_t;
 #include "common/FileSystem.h"
 #include "common/Image.h"
 #include "common/Path.h"
+#include "Counters.h"
+#include "Host.h"
+#include "VMManager.h"
+#include "SIO/Pad/Pad.h"
+#include "SIO/Pad/PadDualshock2.h"
 
 #include <cstring>
 #include <cstdio>
@@ -68,7 +73,9 @@ typedef int socket_t;
 #include <chrono>
 #include <ctime>
 #include <future>
+#include <functional>
 #include <memory>
+#include <tuple>
 
 // Forward declarations — these are PCSX2 globals
 extern R5900DebugInterface r5900Debug;
@@ -305,6 +312,59 @@ namespace DebugServer
 		if (name == "iop" || name == "r3000" || name == "IOP")
 			return BREAKPOINT_IOP;
 		return BREAKPOINT_EE;
+	}
+
+	// ============================================================
+	// Emulator thread helpers (controller, frame advance, emulation)
+	// ============================================================
+
+	// Runs fn on PCSX2's CPU thread, which also answers while emulation is paused; false when it does not answer
+	// within the timeout.
+	static bool runOnCpuThread(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::seconds(5))
+	{
+		auto done = std::make_shared<std::promise<void>>();
+		auto got = done->get_future();
+		Host::RunOnCPUThread([fn = std::move(fn), done]() {
+			fn();
+			done->set_value();
+		});
+		return got.wait_for(timeout) == std::future_status::ready;
+	}
+
+	static const char* vmStateName(VMState state)
+	{
+		switch (state)
+		{
+			case VMState::Running: return "running";
+			case VMState::Paused: return "paused";
+			case VMState::Initializing: return "initializing";
+			case VMState::Stopping: return "stopping";
+			default: return "shutdown";
+		}
+	}
+
+	// The DualShock 2 buttons by name: pressure buttons take SetRawPressureButton, the rest Set (as input recordings
+	// apply them).
+	struct PadButton { const char* name; u32 input; bool pressure; };
+	static constexpr PadButton s_padButtons[] = {
+		{"up", PadDualshock2::Inputs::PAD_UP, true}, {"right", PadDualshock2::Inputs::PAD_RIGHT, true},
+		{"down", PadDualshock2::Inputs::PAD_DOWN, true}, {"left", PadDualshock2::Inputs::PAD_LEFT, true},
+		{"triangle", PadDualshock2::Inputs::PAD_TRIANGLE, true}, {"circle", PadDualshock2::Inputs::PAD_CIRCLE, true},
+		{"cross", PadDualshock2::Inputs::PAD_CROSS, true}, {"square", PadDualshock2::Inputs::PAD_SQUARE, true},
+		{"l1", PadDualshock2::Inputs::PAD_L1, true}, {"l2", PadDualshock2::Inputs::PAD_L2, true},
+		{"r1", PadDualshock2::Inputs::PAD_R1, true}, {"r2", PadDualshock2::Inputs::PAD_R2, true},
+		{"select", PadDualshock2::Inputs::PAD_SELECT, false}, {"start", PadDualshock2::Inputs::PAD_START, false},
+		{"l3", PadDualshock2::Inputs::PAD_L3, false}, {"r3", PadDualshock2::Inputs::PAD_R3, false},
+	};
+
+	static std::string errorJson(const std::string& message)
+	{
+		JsonBuilder e;
+		e.startObject();
+		e.kv("ok", false);
+		e.kv("error", message);
+		e.endObject();
+		return e.str();
 	}
 
 	// ============================================================
@@ -936,6 +996,126 @@ namespace DebugServer
 				j.kv("error", f.ok ? "could not write " + path : std::string("no picture to capture yet"));
 			j.endObject();
 		}
+		// ----- CONTROLLER -----
+		// Sets a DualShock 2's whole state: "buttons" (comma-separated names) held, every other button released,
+		// sticks "lx" "ly" "rx" "ry" 0-255 (127 = centre). It stays until the next controller command or a change
+		// from the host's own input. "port": 0 or 1.
+		else if (cmd == "controller")
+		{
+			const int64_t port = getNum(params, "port", 0);
+			if (port < 0 || port > 1)
+				return errorJson("port must be 0 or 1");
+			std::vector<bool> held(std::size(s_padButtons), false);
+			const std::string list = getStr(params, "buttons", "");
+			size_t start = 0;
+			while (start <= list.size())
+			{
+				size_t end = list.find(',', start);
+				if (end == std::string::npos) end = list.size();
+				std::string name = list.substr(start, end - start);
+				const size_t first = name.find_first_not_of(' ');
+				name = (first == std::string::npos) ? std::string() : name.substr(first, name.find_last_not_of(' ') - first + 1);
+				for (char& c : name) c = (char)std::tolower((unsigned char)c);
+				if (!name.empty())
+				{
+					size_t i = 0;
+					while (i < std::size(s_padButtons) && name != s_padButtons[i].name) i++;
+					if (i == std::size(s_padButtons))
+						return errorJson("unknown button " + name + ": up right down left triangle circle cross square l1 l2 r1 r2 select start l3 r3");
+					held[i] = true;
+				}
+				start = end + 1;
+			}
+			std::array<u8, 4> sticks;
+			const char* stickKeys[4] = {"lx", "ly", "rx", "ry"};
+			for (int k = 0; k < 4; k++)
+			{
+				const int64_t v = getNum(params, stickKeys[k], 127);
+				if (v < 0 || v > 255)
+					return errorJson(std::string(stickKeys[k]) + " must be 0 to 255 (127 = centre)");
+				sticks[k] = (u8)v;
+			}
+			if (!VMManager::HasValidVM())
+				return errorJson("no game is running");
+
+			auto problem = std::make_shared<std::string>();
+			const bool answered = runOnCpuThread([problem, held, sticks, port]() {
+				PadBase* pad = Pad::GetPad((u8)port, 0);
+				if (!pad || pad->GetType() != Pad::ControllerType::DualShock2)
+				{
+					*problem = "port " + std::to_string(port) + " has no DualShock 2";
+					return;
+				}
+				pad->SetRawAnalogs({sticks[0], sticks[1]}, {sticks[2], sticks[3]});
+				for (size_t i = 0; i < std::size(s_padButtons); i++)
+				{
+					if (s_padButtons[i].pressure)
+						pad->SetRawPressureButton(s_padButtons[i].input, {held[i], (u8)(held[i] ? 255 : 0)});
+					else
+						pad->Set(s_padButtons[i].input, held[i] ? 1.0f : 0.0f);
+				}
+			});
+			if (!answered)
+				return errorJson("the CPU thread did not answer within 5 s");
+			if (!problem->empty())
+				return errorJson(*problem);
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.key("held"); j.startArray();
+			for (size_t i = 0; i < std::size(s_padButtons); i++)
+				if (held[i]) j.valStr(s_padButtons[i].name);
+			j.endArray();
+			j.endObject();
+		}
+		// ----- FRAME ADVANCE -----
+		// Runs "frames" (1-600) frames, then pauses, and answers once paused. Emulation held by the debugger
+		// (pause, a breakpoint) does not advance: resume it first.
+		else if (cmd == "frame_advance")
+		{
+			const int64_t frames = getNum(params, "frames", 1);
+			if (frames < 1 || frames > 600)
+				return errorJson("frames must be 1 to 600");
+			if (!VMManager::HasValidVM())
+				return errorJson("no game is running");
+			const u32 before = g_FrameCount;
+			if (!runOnCpuThread([frames]() { VMManager::FrameAdvance((u32)frames); }))
+				return errorJson("the CPU thread did not answer within 5 s");
+			// Wait for the pause a frame advance ends with: at least 20 frames a second, plus 5 s.
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(frames * 50 + 5000);
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			while (VMManager::GetState() != VMState::Paused && std::chrono::steady_clock::now() < deadline)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			if (VMManager::GetState() != VMState::Paused)
+				return errorJson("emulation did not pause again in time (is the debugger holding it? resume it first)");
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("frames", frames);
+			j.kv("frame_before", (int64_t)before);
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.endObject();
+		}
+		// ----- EMULATION -----
+		// "action": pause or resume emulation as a whole (not the debugger's CPU break), or status.
+		else if (cmd == "emulation")
+		{
+			const std::string action = getStr(params, "action", "status");
+			if (action != "pause" && action != "resume" && action != "status")
+				return errorJson("action must be pause, resume or status");
+			if (action != "status")
+			{
+				if (!VMManager::HasValidVM())
+					return errorJson("no game is running");
+				const bool pause = action == "pause";
+				if (!runOnCpuThread([pause]() { VMManager::SetPaused(pause); }))
+					return errorJson("the CPU thread did not answer within 5 s");
+			}
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("state", vmStateName(VMManager::GetState()));
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -951,7 +1131,8 @@ namespace DebugServer
 				"set_memcheck", "remove_memcheck", "list_memchecks",
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
-				"is_valid_address", "clear_breakpoints", "screenshot"
+				"is_valid_address", "clear_breakpoints", "screenshot",
+				"controller", "frame_advance", "emulation"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();

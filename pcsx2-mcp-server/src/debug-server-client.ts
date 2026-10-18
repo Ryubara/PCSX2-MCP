@@ -390,4 +390,27 @@ export class DebugServerClient {
     if (!resp.ok) throw new Error(resp.error);
     return { path: resp.path, width: resp.width, height: resp.height };
   }
+
+  // ===== Controller and frames =====
+
+  /** Sets a DualShock 2's whole state: these buttons held, all others released; sticks 0-255, 127 = centre. */
+  async controller(state: { port?: number; buttons?: string[]; lx?: number; ly?: number; rx?: number; ry?: number }): Promise<{ frame: number; held: string[] }> {
+    const resp = await this.send({ cmd: 'controller', ...state, buttons: (state.buttons ?? []).join(',') });
+    if (!resp.ok) throw new Error(resp.error);
+    return { frame: resp.frame, held: resp.held };
+  }
+
+  /** Runs this many frames, then pauses; answers once paused. */
+  async frameAdvance(frames: number): Promise<{ before: number; frame: number }> {
+    const resp = await this.send({ cmd: 'frame_advance', frames });
+    if (!resp.ok) throw new Error(resp.error);
+    return { before: resp.frame_before, frame: resp.frame };
+  }
+
+  /** Pauses or resumes emulation as a whole (not the debugger's CPU break), or reports its state. */
+  async emulation(action: 'pause' | 'resume' | 'status'): Promise<{ state: string; frame: number }> {
+    const resp = await this.send({ cmd: 'emulation', action });
+    if (!resp.ok) throw new Error(resp.error);
+    return { state: resp.state, frame: resp.frame };
+  }
 }
