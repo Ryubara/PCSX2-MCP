@@ -21,7 +21,12 @@
 // ============================================================
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX // windows.h's min/max macros break std::numeric_limits<T>::max() in PCSX2's headers
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
@@ -42,6 +47,13 @@ typedef int socket_t;
 #include "DebugInterface.h"
 #include "Breakpoints.h"
 #include "MipsStackWalk.h"
+#include "Config.h"
+#include "MTGS.h"
+#include "GS/Renderers/Common/GSDevice.h"
+#include "GS/Renderers/Common/GSRenderer.h"
+#include "common/FileSystem.h"
+#include "common/Image.h"
+#include "common/Path.h"
 
 #include <cstring>
 #include <cstdio>
@@ -53,6 +65,10 @@ typedef int socket_t;
 #include <condition_variable>
 #include <sstream>
 #include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <future>
+#include <memory>
 
 // Forward declarations — these are PCSX2 globals
 extern R5900DebugInterface r5900Debug;
@@ -839,6 +855,87 @@ namespace DebugServer
 			j.kv("ok", true);
 			j.endObject();
 		}
+		// ----- SCREENSHOT -----
+		// Saves the picture PCSX2 shows now (paused or running) as a PNG in its snapshots folder and returns the
+		// path. "name" (optional): a file name of letters, digits, '.', '_' and '-'; ".png" is added if missing.
+		else if (cmd == "screenshot")
+		{
+			std::string name = getStr(params, "name", "");
+			bool nameOk = name.size() <= 100;
+			for (char c : name)
+				nameOk = nameOk && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+										c == '.' || c == '_' || c == '-');
+			if (!nameOk || name == "." || name == "..")
+			{
+				j.startObject();
+				j.kv("ok", false);
+				j.kv("error", "name must be a file name of letters, digits, '.', '_' and '-' (up to 100)");
+				j.endObject();
+				return j.str();
+			}
+			if (name.empty())
+			{
+				const auto now = std::chrono::system_clock::now();
+				const std::time_t t = std::chrono::system_clock::to_time_t(now);
+				const int ms = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+				char stamp[32];
+				std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&t));
+				char buf[48];
+				snprintf(buf, sizeof(buf), "mcp-%s-%03d", stamp, ms);
+				name = buf;
+			}
+			if (name.size() < 4 || name.compare(name.size() - 4, 4, ".png") != 0)
+				name += ".png";
+
+			if (!MTGS::IsOpen())
+			{
+				j.startObject();
+				j.kv("ok", false);
+				j.kv("error", "no game is running");
+				j.endObject();
+				return j.str();
+			}
+
+			// The frame is read on the GS thread; the PNG is encoded here, so the GS thread is not held up.
+			struct Frame { bool ok = false; u32 width = 0; u32 height = 0; std::vector<u32> pixels; };
+			auto frame = std::make_shared<std::promise<Frame>>();
+			auto got = frame->get_future();
+			MTGS::RunOnGSThread([frame]() {
+				Frame f;
+				f.ok = g_gs_renderer && g_gs_device && g_gs_device->GetCurrent() &&
+					   g_gs_renderer->SaveSnapshotToMemory(0, 0, true, true, &f.width, &f.height, &f.pixels);
+				frame->set_value(std::move(f));
+			});
+			if (got.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+			{
+				j.startObject();
+				j.kv("ok", false);
+				j.kv("error", "the GS thread did not answer within 5 s");
+				j.endObject();
+				return j.str();
+			}
+			Frame f = got.get();
+			const std::string path = Path::Combine(EmuFolders::Snapshots, name);
+			bool saved = false;
+			if (f.ok)
+			{
+				FileSystem::CreateDirectoryPath(EmuFolders::Snapshots.c_str(), false);
+				RGBA8Image image;
+				image.SetPixels(f.width, f.height, std::move(f.pixels));
+				saved = image.SaveToFile(path.c_str());
+			}
+			j.startObject();
+			j.kv("ok", saved);
+			if (saved)
+			{
+				j.kv("path", path);
+				j.kv("width", (int64_t)f.width);
+				j.kv("height", (int64_t)f.height);
+			}
+			else
+				j.kv("error", f.ok ? "could not write " + path : std::string("no picture to capture yet"));
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -854,7 +951,7 @@ namespace DebugServer
 				"set_memcheck", "remove_memcheck", "list_memchecks",
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
-				"is_valid_address", "clear_breakpoints"
+				"is_valid_address", "clear_breakpoints", "screenshot"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();

@@ -381,4 +381,13 @@ export class DebugServerClient {
     const resp = await this.send({ cmd: 'clear_breakpoints' });
     if (!resp.ok) throw new Error(resp.error);
   }
+
+  // ===== Screenshot =====
+
+  /** Saves the picture PCSX2 shows now as a PNG in its snapshots folder; paused or running. */
+  async screenshot(name?: string): Promise<{ path: string; width: number; height: number }> {
+    const resp = await this.send(name ? { cmd: 'screenshot', name } : { cmd: 'screenshot' });
+    if (!resp.ok) throw new Error(resp.error);
+    return { path: resp.path, width: resp.width, height: resp.height };
+  }
 }
