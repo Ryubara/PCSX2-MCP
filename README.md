@@ -44,6 +44,11 @@ DebugServerPort = 21513
   as PCSX2's input recordings apply it; it stays until the next call. `pcsx2_emulation` pauses or resumes emulation
   as a whole (unlike `pcsx2_pause`, the debugger's CPU break), and `pcsx2_frame_advance` runs N frames from there
   and pauses again, so input can be set frame by frame. Every answer carries PCSX2's frame counter.
+- `pcsx2_capture` (debug server command `capture`, `action` start, stop or status, optional `name` on start)
+  starts PCSX2's own video capture into its videos folder, stops it (waiting for the encoder) or reports it, with
+  the file's path. Codec, size and sound come from PCSX2's capture settings. Only presented frames are recorded:
+  none while paused, one per frame advanced. Commands now carry their own timeout in the MCP server, so a long
+  `pcsx2_frame_advance` or a capture's stop is no longer cut off at 10 s.
 
 To build it, run `pcsx2-plugin\prepare.ps1` (it clones PCSX2 at a tag, adds the plugin, applies
 `pcsx2-plugin\pcsx2-integration.patch`, adds a `windows-msvc` CMake preset and unpacks PCSX2's prebuilt Windows

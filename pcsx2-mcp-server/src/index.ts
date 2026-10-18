@@ -595,6 +595,28 @@ server.tool('pcsx2_emulation', 'Pause or resume emulation as a whole, or report 
 );
 
 // ==========================================================
+//  TOOL: pcsx2_capture
+// ==========================================================
+server.tool('pcsx2_capture', 'Start PCSX2\'s own video capture into its videos folder, stop it, or report it. Codec, size and whether sound is recorded come from PCSX2\'s settings. Only presented frames are recorded: none while paused, one per frame advanced. For exact frames, pcsx2_frame_advance with pcsx2_screenshot is lossless.',
+  {
+    action: z.enum(['start', 'stop', 'status']).default('status'),
+    name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/).optional().describe('start only: file name (the container\'s extension, mp4 by default, is added); default mcp-<date>-<time>-<ms>'),
+  },
+  async ({ action, name }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    try {
+      const r = await debugServer!.capture(action, action === 'start' ? name : undefined);
+      const file = r.path ? `: ${r.path}` : '';
+      const text = r.capturing
+        ? `Capturing ${r.video ? 'video' : ''}${r.video && r.audio ? ' and ' : ''}${r.audio ? 'audio' : ''} for ${r.elapsed}${file}, at frame ${r.frame}`
+        : `${action === 'stop' ? 'Capture stopped' : 'Not capturing'}${file}, at frame ${r.frame}`;
+      return { content: [{ type: 'text' as const, text }] };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+// ==========================================================
 //  PS2Recomp Integration Tools
 // ==========================================================
 server.tool('ps2recomp_lookup_function', 'Search PS2Recomp project for functions by address or name.',
