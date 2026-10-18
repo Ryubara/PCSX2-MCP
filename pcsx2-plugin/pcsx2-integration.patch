@@ -1,0 +1,121 @@
+diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
+index 4c8ce81..2a0ed94 100644
+--- a/pcsx2/CMakeLists.txt
++++ b/pcsx2/CMakeLists.txt
+@@ -804,6 +804,7 @@ endif()
+ # DebugTools sources
+ set(pcsx2DebugToolsSources
+ 	DebugTools/DebugInterface.cpp
++	DebugTools/DebugServer.cpp
+ 	DebugTools/DisassemblyManager.cpp
+ 	DebugTools/ExpressionParser.cpp
+ 	DebugTools/MIPSAnalyst.cpp
+@@ -822,6 +823,7 @@ set(pcsx2DebugToolsSources
+ # DebugTools headers
+ set(pcsx2DebugToolsHeaders
+ 	DebugTools/DebugInterface.h
++	DebugTools/DebugServer.h
+ 	DebugTools/DisassemblyManager.h
+ 	DebugTools/ExpressionParser.h
+ 	DebugTools/MIPSAnalyst.h
+diff --git a/pcsx2/Config.h b/pcsx2/Config.h
+index a8a23c6..3ba6040 100644
+--- a/pcsx2/Config.h
++++ b/pcsx2/Config.h
+@@ -1405,6 +1405,10 @@ struct Pcsx2Config
+ 
+ 	int PINESlot;
+ 
++	// PCSX2-MCP's debug server: off unless enabled, and on its own port per instance
++	bool EnableDebugServer;
++	int DebugServerPort;
++
+ 	int RtcYear;
+ 	int RtcMonth;
+ 	int RtcDay;
+diff --git a/pcsx2/Pcsx2Config.cpp b/pcsx2/Pcsx2Config.cpp
+index 2a99824..e6dfb11 100644
+--- a/pcsx2/Pcsx2Config.cpp
++++ b/pcsx2/Pcsx2Config.cpp
+@@ -1984,6 +1984,8 @@ Pcsx2Config::Pcsx2Config()
+ 
+ 	GzipIsoIndexTemplate = "$(f).pindex.tmp";
+ 	PINESlot = 28011;
++	EnableDebugServer = false;
++	DebugServerPort = 21512;
+ 	RtcYear = 0;
+ 	RtcMonth = 1;
+ 	RtcDay = 1;
+@@ -2040,6 +2042,8 @@ void Pcsx2Config::LoadSaveCore(SettingsWrapper& wrap)
+ 
+ 	SettingsWrapEntry(GzipIsoIndexTemplate);
+ 	SettingsWrapEntry(PINESlot);
++	SettingsWrapEntry(EnableDebugServer);
++	SettingsWrapEntry(DebugServerPort);
+ 	SettingsWrapEntry(RtcYear);
+ 	SettingsWrapEntry(RtcMonth);
+ 	SettingsWrapEntry(RtcDay);
+diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
+index 082d574..a81f1ac 100644
+--- a/pcsx2/VMManager.cpp
++++ b/pcsx2/VMManager.cpp
+@@ -26,6 +26,7 @@
+ #include "MTGS.h"
+ #include "MTVU.h"
+ #include "PINE.h"
++#include "DebugTools/DebugServer.h"
+ #include "Patch.h"
+ #include "PerformanceMetrics.h"
+ #include "R3000A.h"
+@@ -136,6 +137,7 @@ namespace VMManager
+ 	static void ResetResumeTimestamp();
+ 	static void SaveSessionTime(const std::string& prev_serial);
+ 	static void ReloadPINE();
++	static void ReloadDebugServer();
+ 
+ 	static float GetTargetSpeedForLimiterMode(LimiterModeType mode);
+ 	static void ResetFrameLimiter();
+@@ -427,6 +429,7 @@ bool VMManager::Internal::CPUThreadInitialize()
+ 		Achievements::Initialize();
+ 
+ 	ReloadPINE();
++	ReloadDebugServer();
+ 
+ 	if (EmuConfig.EnableDiscordPresence)
+ 		InitializeDiscordPresence();
+@@ -443,6 +446,7 @@ void VMManager::Internal::CPUThreadShutdown()
+ 	ShutdownDiscordPresence();
+ 
+ 	PINEServer::Deinitialize();
++	DebugServer::Stop();
+ 
+ 	Achievements::Shutdown(false);
+ 
+@@ -1172,6 +1176,7 @@ void VMManager::UpdateDiscDetails(bool booting)
+ 	{
+ 		Achievements::GameChanged(s_disc_crc, s_current_crc);
+ 		ReloadPINE();
++		ReloadDebugServer();
+ 		UpdateDiscordPresence(s_state.load(std::memory_order_relaxed) == VMState::Initializing);
+ 		FileMcd_Reopen(memcardFilters.empty() ? s_disc_serial : memcardFilters);
+ 	}
+@@ -3808,6 +3813,19 @@ void VMManager::ReloadPINE()
+ 		PINEServer::Initialize(EmuConfig.PINESlot);
+ }
+ 
++void VMManager::ReloadDebugServer()
++{
++	// Restarts the debug server when it is switched on or off, moved to another port, or did not get its port.
++	const bool listening = DebugServer::GetPort() == EmuConfig.DebugServerPort;
++	if (EmuConfig.EnableDebugServer == DebugServer::IsRunning() && (!EmuConfig.EnableDebugServer || listening))
++		return;
++
++	DebugServer::Stop();
++
++	if (EmuConfig.EnableDebugServer)
++		DebugServer::Start(EmuConfig.DebugServerPort);
++}
++
+ void VMManager::InitializeDiscordPresence()
+ {
+ 	if (s_discord_presence_active)
