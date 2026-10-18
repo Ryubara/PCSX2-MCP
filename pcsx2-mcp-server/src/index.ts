@@ -537,6 +537,21 @@ server.tool('pcsx2_clear_all_breakpoints', 'Clear ALL breakpoints and watchpoint
 );
 
 // ==========================================================
+//  TOOL: pcsx2_screenshot
+// ==========================================================
+server.tool('pcsx2_screenshot', 'Save the picture PCSX2 shows now (paused or running) as a PNG in its snapshots folder. Returns the file path; open the file to look at it.',
+  { name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/).optional().describe('File name (".png" is added); default mcp-<date>-<time>-<ms>') },
+  async ({ name }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    try {
+      const shot = await debugServer!.screenshot(name);
+      return { content: [{ type: 'text' as const, text: `Saved ${shot.width}x${shot.height} screenshot: ${shot.path}` }] };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+// ==========================================================
 //  PS2Recomp Integration Tools
 // ==========================================================
 server.tool('ps2recomp_lookup_function', 'Search PS2Recomp project for functions by address or name.',

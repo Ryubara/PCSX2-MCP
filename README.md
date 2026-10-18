@@ -37,6 +37,9 @@ DebugServerPort = 21513
   `[DebugServer] Failed to bind on port N` instead of sharing it.
 - The MCP server needs no change: `pcsx2_connect` takes `debug_port`.
 - The plugin builds against current PCSX2 (checked with `v2.9.129`).
+- `pcsx2_screenshot` (debug server command `screenshot`, optional `name`) saves the picture PCSX2 shows now,
+  paused or running, as a PNG in its snapshots folder at internal resolution, and returns the file's path, so the
+  assistant opens the image only when it needs it. The frame is read on the GS thread and encoded off it.
 
 To build it, run `pcsx2-plugin\prepare.ps1` (it clones PCSX2 at a tag, adds the plugin, applies
 `pcsx2-plugin\pcsx2-integration.patch`, adds a `windows-msvc` CMake preset and unpacks PCSX2's prebuilt Windows
