@@ -56,6 +56,18 @@ DebugServerPort = 21513
   state: queued, recording, done, or dropped when PCSX2 did not take it. PCSX2 starts a dump at the next frame and
   closes it a few frames after the last, so while running a start waits until it is written; while paused it stays
   queued until frames run (resume, or advance about N + 5 frames), and `status` reports it.
+- `pcsx2_input_recording` (debug server command `input_recording`, `action` new, play, stop or status) drives
+  PCSX2's own input recording (`.p2m2`) through the calls its "Input Recording" menu makes, on the CPU thread. `new`
+  takes `author` (required, as the menu's dialog requires it), `from` savestate (the current point: PCSX2 saves its
+  start savestate beside the file as `<file>.p2m2_SaveState.p2s`, keeping one already there as `.bak`) or power_on
+  (PCSX2 resets the game and records from boot), an optional `path` (default `recordings/mcp-<stamp>.p2m2`) and
+  `overwrite`. `play` takes `path` and loads its savestate (or resets the game) as the file says, then replays it;
+  PCSX2 pauses at its last frame and records on from there. `stop` closes it (while running, at the end of the
+  frame). `status` reports the mode (off, recording or replaying), file, start, author, game, recording frame, total
+  frames and undo count. A path is relative to PCSX2's data folder (a portable install's own folder): names of
+  letters, digits, `.`, `_` and `-` split by `/`, no `.` or `..`, and its real folder must lie inside; `.p2m2` is
+  added when missing. Every frame's pad state is recorded, `pcsx2_controller`'s too. PCSX2's own menu does not see
+  a recording started this way, so it still offers "New" and "Reset" while one runs.
 
 To build it, run `pcsx2-plugin\prepare.ps1` (it clones PCSX2 at a tag, adds the plugin, applies
 `pcsx2-plugin\pcsx2-integration.patch`, adds a `windows-msvc` CMake preset and unpacks PCSX2's prebuilt Windows
