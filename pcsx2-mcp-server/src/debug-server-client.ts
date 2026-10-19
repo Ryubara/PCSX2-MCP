@@ -431,4 +431,43 @@ export class DebugServerClient {
     if (!resp.ok) throw new Error(resp.error);
     return { state: resp.state, path: resp.path, screenshot: resp.screenshot, frames: resp.frames, emulation: resp.emulation, frame: resp.frame };
   }
+
+  /** Drives PCSX2's own input recording (.p2m2): new, play, stop, or status. */
+  async inputRecording(action: 'new' | 'play' | 'stop' | 'status', opts: { path?: string; author?: string; from?: 'savestate' | 'power_on'; overwrite?: boolean } = {}): Promise<InputRecordingStatus> {
+    const cmd: Record<string, any> = { cmd: 'input_recording', action };
+    if (action === 'new' || action === 'play') {
+      if (opts.path) cmd.path = opts.path;
+    }
+    if (action === 'new') {
+      cmd.author = opts.author;
+      cmd.from = opts.from ?? 'savestate';
+      cmd.overwrite = opts.overwrite ?? false;
+    }
+    // new and play save or load the start state on the server (up to 30 s); stop waits up to 5 s for a frame to end
+    const resp = await this.send(cmd, action === 'new' || action === 'play' ? 40000 : action === 'stop' ? 15000 : 10000);
+    if (!resp.ok) throw new Error(resp.error);
+    return {
+      mode: resp.mode, path: resp.path, from: resp.from, savestate: resp.savestate, savestateExists: resp.savestate_exists,
+      author: resp.author, game: resp.game, recordingFrame: resp.recording_frame, totalFrames: resp.total_frames,
+      undoCount: resp.undo_count, startingFrame: resp.starting_frame, stopped: resp.stopped, emulation: resp.emulation, frame: resp.frame,
+    };
+  }
+}
+
+/** What PCSX2's input recording holds, as the debug server's input_recording command answers. */
+export interface InputRecordingStatus {
+  mode: 'off' | 'recording' | 'replaying';
+  path?: string;
+  from?: 'savestate' | 'power_on';
+  savestate?: string;
+  savestateExists?: boolean;
+  author?: string;
+  game?: string;
+  recordingFrame?: number;
+  totalFrames?: number;
+  undoCount?: number;
+  startingFrame?: number;
+  stopped?: string;
+  emulation: string;
+  frame: number;
 }

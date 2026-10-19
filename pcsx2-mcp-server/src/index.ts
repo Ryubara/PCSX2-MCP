@@ -646,6 +646,37 @@ server.tool('pcsx2_gs_dump', 'Save PCSX2\'s own GS dump (the .gs file of its "Sa
 );
 
 // ==========================================================
+//  TOOL: pcsx2_input_recording
+// ==========================================================
+server.tool('pcsx2_input_recording', 'PCSX2\'s own input recording (.p2m2, as its "Input Recording" menu makes and plays): new records every frame\'s controller input (pcsx2_controller\'s too) from the current point, saving PCSX2\'s start savestate beside it as <file>.p2m2_SaveState.p2s (from savestate), or from a reset of the game (from power_on); play loads that savestate (or resets the game) and replays the inputs, pausing at the last frame; stop closes the file; status reports the mode, file, frame, total frames and undo count. Paths are relative to PCSX2\'s data folder (a portable install\'s own folder).',
+  {
+    action: z.enum(['new', 'play', 'stop', 'status']).default('status'),
+    path: z.string().max(400).regex(/^[A-Za-z0-9._\/-]+$/).optional().describe('new and play: the recording, relative to PCSX2\'s data folder, names of letters, digits, ".", "_" and "-" split by "/" (no "." or ".."); .p2m2 is added when missing. play needs it; new defaults to recordings/mcp-<date>-<time>-<ms>.p2m2'),
+    author: z.string().min(1).max(254).regex(/^[ -~]+$/).optional().describe('new only (required): the author written into the file\'s header'),
+    from: z.enum(['savestate', 'power_on']).default('savestate').describe('new only: savestate starts at the current point (PCSX2 saves its start savestate beside the file), power_on resets the game and starts at boot'),
+    overwrite: z.boolean().default(false).describe('new only: replace a recording that exists (PCSX2 keeps the old savestate as .bak)'),
+  },
+  async ({ action, path, author, from, overwrite }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    if (action === 'new' && !author) return { content: [{ type: 'text' as const, text: 'Error: new needs an author.' }], isError: true };
+    if (action === 'play' && !path) return { content: [{ type: 'text' as const, text: 'Error: play needs the recording\'s path.' }], isError: true };
+    try {
+      const r = await debugServer!.inputRecording(action, { path, author, from, overwrite });
+      const at = `emulation ${r.emulation}, at frame ${r.frame}`;
+      let text: string;
+      if (r.mode === 'off') text = `${r.stopped ? `Input recording stopped: ${r.stopped}` : 'No input recording active'}, ${at}`;
+      else {
+        const start = r.from === 'savestate' ? `from savestate ${r.savestate}${r.savestateExists ? '' : ' (still being written)'}` : 'from power-on';
+        const verb = action === 'new' ? 'Recording started' : action === 'play' ? 'Replay started' : r.mode === 'recording' ? 'Recording' : 'Replaying';
+        text = `${verb}: ${r.path} (${r.mode}, ${start}; author ${r.author}, game ${r.game}), recording frame ${r.recordingFrame} of ${r.totalFrames}, undo count ${r.undoCount}, ${at}`;
+      }
+      return { content: [{ type: 'text' as const, text }] };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+// ==========================================================
 //  PS2Recomp Integration Tools
 // ==========================================================
 server.tool('ps2recomp_lookup_function', 'Search PS2Recomp project for functions by address or name.',

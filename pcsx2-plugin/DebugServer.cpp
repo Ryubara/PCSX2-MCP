@@ -62,10 +62,12 @@ typedef int socket_t;
 #include "VMManager.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
+#include "Recording/InputRecording.h"
 
 #include <cstring>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -371,16 +373,22 @@ namespace DebugServer
 		return got.wait_for(timeout) == std::future_status::ready;
 	}
 
+	// A plain file name: letters, digits, '.', '_' and '-', up to 100, not "." or ".."
+	static bool plainFileName(const std::string& name)
+	{
+		bool nameOk = name.size() <= 100;
+		for (char c : name)
+			nameOk = nameOk && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+									c == '.' || c == '_' || c == '-');
+		return nameOk && name != "." && name != "..";
+	}
+
 	// The file name a command was given ("name": letters, digits, '.', '_' and '-', up to 100), or a stamped default
 	// mcp-<date>-<time>-<ms>; "ext" is added when it does not end with it. Empty when the name is not allowed.
 	static std::string fileName(const std::unordered_map<std::string, JsonValue>& params, const std::string& ext)
 	{
 		std::string name = getStr(params, "name", "");
-		bool nameOk = name.size() <= 100;
-		for (char c : name)
-			nameOk = nameOk && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-									c == '.' || c == '_' || c == '-');
-		if (!nameOk || name == "." || name == "..")
+		if (!plainFileName(name))
 			return {};
 		if (name.empty())
 		{
@@ -399,6 +407,80 @@ namespace DebugServer
 	}
 
 	static const char* const FILE_NAME_RULE = "name must be a file name of letters, digits, '.', '_' and '-' (up to 100)";
+
+	// Input recordings stay in this instance's own data folder (EmuFolders::DataRoot: a portable install's own
+	// folder), at a relative path of plain names; a new one goes into its recordings folder by default. PCSX2 keeps a
+	// recording's start savestate beside it, as <file>.p2m2_SaveState.p2s.
+	static constexpr const char* INPUT_RECORDING_DIR = "recordings";
+	static constexpr std::string_view INPUT_RECORDING_EXT = ".p2m2";
+	static constexpr size_t INPUT_RECORDING_MAX_PARTS = 8;
+	static const char* const RECORDING_PATH_RULE = "path must be relative to PCSX2's data folder: up to 8 names of "
+												   "letters, digits, '.', '_' and '-' (up to 100 each) split by '/', "
+												   "with no '.' or '..' (.p2m2 is added when missing)";
+
+	// The full path of a recording given relative to the data folder, or empty when it is not allowed.
+	static std::string recordingPath(std::string given)
+	{
+		if (!given.ends_with(INPUT_RECORDING_EXT))
+			given += INPUT_RECORDING_EXT;
+		std::vector<std::string> parts(1);
+		for (char c : given)
+		{
+			if (c == '/' || c == '\\')
+				parts.emplace_back();
+			else
+				parts.back() += c;
+		}
+		if (parts.size() > INPUT_RECORDING_MAX_PARTS)
+			return {};
+		std::string path = EmuFolders::DataRoot;
+		for (const std::string& part : parts)
+		{
+			if (part.empty() || !plainFileName(part))
+				return {};
+			path = Path::Combine(path, part);
+		}
+		return path;
+	}
+
+	// Once a recording's folder exists: whether that real folder lies inside the real data folder (no link leads out).
+	static bool insideDataRoot(const std::string& path)
+	{
+		const std::string root = Path::RealPath(EmuFolders::DataRoot);
+		const std::string dir = Path::RealPath(Path::GetDirectory(path));
+		if (root.empty() || dir.compare(0, root.size(), root) != 0)
+			return false;
+		return dir.size() == root.size() || dir[root.size()] == '/' || dir[root.size()] == '\\';
+	}
+
+	// What PCSX2's input recording holds now; read on the CPU thread, which alone drives it.
+	struct InputRecordingState
+	{
+		bool active = false;
+		bool recording = false;
+		bool fromSavestate = false;
+		std::string path, author, game;
+		u32 frame = 0, totalFrames = 0, undoCount = 0, startingFrame = 0;
+	};
+
+	static InputRecordingState readInputRecording()
+	{
+		InputRecordingState s;
+		s.active = g_InputRecording.isActive();
+		if (!s.active)
+			return s;
+		const InputRecordingFile& file = g_InputRecording.getData();
+		s.recording = g_InputRecording.getControls().isRecording();
+		s.fromSavestate = g_InputRecording.isTypeSavestate();
+		s.path = file.getFilename();
+		s.author = file.getAuthor();
+		s.game = file.getGameName();
+		s.frame = g_InputRecording.getFrameCounter();
+		s.totalFrames = file.getTotalFrames();
+		s.undoCount = file.getUndoCount();
+		s.startingFrame = g_InputRecording.getStartingFrame();
+		return s;
+	}
 
 	// The file the running capture writes to, as this server started it ("" when none did).
 	static std::mutex s_captureLock;
@@ -1371,6 +1453,142 @@ namespace DebugServer
 			j.kv("frame", (int64_t)g_FrameCount);
 			j.endObject();
 		}
+		// ----- INPUT RECORDING -----
+		// "action": PCSX2's own input recording (.p2m2), driven through the calls its "Input Recording" menu makes, on
+		// the CPU thread. new: record into "path" (relative to the data folder; default recordings/mcp-<stamp>.p2m2)
+		// with "author" (required, as the menu's dialog requires it), "from" savestate (the current point: PCSX2 saves
+		// <file>_SaveState.p2s beside the recording, backing up one already there as .bak) or power_on (PCSX2 resets
+		// the game and records from boot); an existing recording is refused unless "overwrite". play: replay "path",
+		// which loads its start savestate or resets the game as the file says. stop: close it (PCSX2 closes it at the
+		// end of the current frame while running). status: what is active.
+		else if (cmd == "input_recording")
+		{
+			const std::string action = getStr(params, "action", "status");
+			if (action != "new" && action != "play" && action != "stop" && action != "status")
+				return errorJson("action must be new, play, stop or status");
+			auto now = std::make_shared<InputRecordingState>();
+			const auto readNow = [now]() { *now = readInputRecording(); };
+			if (action == "new" || action == "play")
+			{
+				std::string given = getStr(params, "path", "");
+				if (given.empty())
+				{
+					if (action == "play")
+						return errorJson("play needs the recording's path");
+					given = std::string(INPUT_RECORDING_DIR) + "/" + fileName({}, std::string(INPUT_RECORDING_EXT));
+				}
+				const std::string path = recordingPath(given);
+				if (path.empty())
+					return errorJson(RECORDING_PATH_RULE);
+				const std::string from = getStr(params, "from", "savestate");
+				const std::string author = getStr(params, "author", "");
+				if (action == "new")
+				{
+					if (from != "savestate" && from != "power_on")
+						return errorJson("from must be savestate or power_on");
+					bool authorOk = !author.empty() && author.size() <= 254;
+					for (char c : author)
+						authorOk = authorOk && c >= 0x20 && c <= 0x7e;
+					if (!authorOk)
+						return errorJson("author must be 1 to 254 printable ASCII characters");
+				}
+				if (!VMManager::HasValidVM())
+					return errorJson("no game is running");
+				if (!runOnCpuThread(readNow))
+					return errorJson("the CPU thread did not answer within 5 s");
+				if (now->active)
+					return errorJson("an input recording is active already (" + now->path + "): stop it first");
+				if (action == "new")
+				{
+					if (FileSystem::FileExists(path.c_str()) && !getBool(params, "overwrite", false))
+						return errorJson("the file exists already: " + path + " (overwrite to replace it)");
+					FileSystem::CreateDirectoryPath(std::string(Path::GetDirectory(path)).c_str(), true);
+				}
+				else if (!FileSystem::FileExists(path.c_str()))
+					return errorJson("no such recording: " + path);
+				if (!insideDataRoot(path))
+					return errorJson("the recording's folder leads outside PCSX2's data folder: " + path);
+				// Loading or saving the start state can take a while
+				auto started = std::make_shared<bool>(false);
+				const bool savestate = from == "savestate";
+				if (!runOnCpuThread([action, path, savestate, author, started, readNow]() {
+						*started = action == "new" ? g_InputRecording.create(path, savestate, author) : g_InputRecording.play(path);
+						readNow();
+					}, std::chrono::seconds(30)))
+					return errorJson("the CPU thread did not answer within 30 s");
+				if (!*started)
+				{
+					const std::string state = path + "_SaveState.p2s";
+					if (action == "new")
+						return errorJson("PCSX2 could not create the recording: " + path + " (see its log)");
+					return errorJson("PCSX2 could not play the recording: " + path +
+									 (FileSystem::FileExists(state.c_str()) ? " (see its log: not a recording, or its savestate would not load)" :
+																			  " (see its log: not a recording, or one from a savestate whose " + state + " is missing)"));
+				}
+			}
+			else if (action == "stop")
+			{
+				// Only an active recording is stopped: a stop queued while none is active would close the next one
+				if (!runOnCpuThread([readNow]() {
+						readNow();
+						if (g_InputRecording.isActive())
+							g_InputRecording.stop();
+					}))
+					return errorJson("the CPU thread did not answer within 5 s");
+				if (!now->active)
+					return errorJson("no input recording is active");
+				const std::string stopped = now->path;
+				// While running PCSX2 closes the file at the end of the frame
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+				while (true)
+				{
+					if (!runOnCpuThread(readNow))
+						return errorJson("the CPU thread did not answer within 5 s");
+					if (!now->active || std::chrono::steady_clock::now() >= deadline)
+						break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+				if (now->active)
+					return errorJson("PCSX2 closes the recording at the end of a frame, and none ended within 5 s (is the debugger holding emulation?): check with action status");
+				j.startObject();
+				j.kv("ok", true);
+				j.kv("mode", "off");
+				j.kv("stopped", stopped);
+				j.kv("emulation", vmStateName(VMManager::GetState()));
+				j.kv("frame", (int64_t)g_FrameCount);
+				j.endObject();
+				return j.str();
+			}
+			else if (VMManager::HasValidVM())
+			{
+				if (!runOnCpuThread(readNow))
+					return errorJson("the CPU thread did not answer within 5 s");
+			}
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("mode", !now->active ? "off" : now->recording ? "recording" : "replaying");
+			if (now->active)
+			{
+				j.kv("path", now->path);
+				j.kv("from", now->fromSavestate ? "savestate" : "power_on");
+				if (now->fromSavestate)
+				{
+					const std::string state = now->path + "_SaveState.p2s";
+					j.kv("savestate", state);
+					// PCSX2 writes a new recording's savestate in the background
+					j.kv("savestate_exists", FileSystem::FileExists(state.c_str()));
+				}
+				j.kv("author", now->author);
+				j.kv("game", now->game);
+				j.kv("recording_frame", (int64_t)now->frame);
+				j.kv("total_frames", (int64_t)now->totalFrames);
+				j.kv("undo_count", (int64_t)now->undoCount);
+				j.kv("starting_frame", (int64_t)now->startingFrame);
+			}
+			j.kv("emulation", vmStateName(VMManager::GetState()));
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -1387,7 +1605,8 @@ namespace DebugServer
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
 				"is_valid_address", "clear_breakpoints", "screenshot",
-				"controller", "frame_advance", "emulation", "capture", "gs_dump"
+				"controller", "frame_advance", "emulation", "capture", "gs_dump",
+				"input_recording"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();
