@@ -648,7 +648,7 @@ server.tool('pcsx2_gs_dump', 'Save PCSX2\'s own GS dump (the .gs file of its "Sa
 // ==========================================================
 //  TOOL: pcsx2_input_recording
 // ==========================================================
-server.tool('pcsx2_input_recording', 'PCSX2\'s own input recording (.p2m2, as its "Input Recording" menu makes and plays): new records every frame\'s controller input (pcsx2_controller\'s too) from the current point, saving PCSX2\'s start savestate beside it as <file>.p2m2_SaveState.p2s (from savestate), or from a reset of the game (from power_on); play loads that savestate (or resets the game) and replays the inputs, pausing at the last frame; stop closes the file; status reports the mode, file, frame, total frames and undo count. Paths are relative to PCSX2\'s data folder (a portable install\'s own folder).',
+server.tool('pcsx2_input_recording', 'PCSX2\'s own input recording (.p2m2, as its "Input Recording" menu makes and plays): new records every frame\'s controller input (pcsx2_controller\'s too) from the current point, saving PCSX2\'s start savestate beside it as <file>.p2m2_SaveState.p2s (from savestate), or from a reset of the game (from power_on); play loads that savestate (or resets the game) and replays the inputs; at the last frame PCSX2 pauses and the replay stops on its own (file closed unchanged, mode off, emulation left paused), so playing never adds to a recording, and status then reports that the replay ended; stop closes the file and answers its total frames and the frame it stopped at; status reports the mode, file, frame, total frames and undo count. Paths are relative to PCSX2\'s data folder (a portable install\'s own folder).',
   {
     action: z.enum(['new', 'play', 'stop', 'status']).default('status'),
     path: z.string().max(400).regex(/^[A-Za-z0-9._\/-]+$/).optional().describe('new and play: the recording, relative to PCSX2\'s data folder, names of letters, digits, ".", "_" and "-" split by "/" (no "." or ".."); .p2m2 is added when missing. play needs it; new defaults to recordings/mcp-<date>-<time>-<ms>.p2m2'),
@@ -664,11 +664,14 @@ server.tool('pcsx2_input_recording', 'PCSX2\'s own input recording (.p2m2, as it
       const r = await debugServer!.inputRecording(action, { path, author, from, overwrite });
       const at = `emulation ${r.emulation}, at frame ${r.frame}`;
       let text: string;
-      if (r.mode === 'off') text = `${r.stopped ? `Input recording stopped: ${r.stopped}` : 'No input recording active'}, ${at}`;
+      const frames = `recording frame ${r.recordingFrame} of ${r.totalFrames}`;
+      if (r.mode === 'off' && r.stopped) text = r.replayEnded ? `Replay had ended at its last frame and was stopped there already: ${r.stopped} (${frames}, file unchanged), ${at}` : `Input recording stopped: ${r.stopped} (${frames}), ${at}`;
+      else if (r.mode === 'off' && r.replayEnded) text = `No input recording active: the replay of ${r.path} ended at its last frame and was stopped (${frames}, file unchanged; PCSX2 frame ${r.endedAtFrame} then), ${at}`;
+      else if (r.mode === 'off') text = `No input recording active, ${at}`;
       else {
         const start = r.from === 'savestate' ? `from savestate ${r.savestate}${r.savestateExists ? '' : ' (still being written)'}` : 'from power-on';
         const verb = action === 'new' ? 'Recording started' : action === 'play' ? 'Replay started' : r.mode === 'recording' ? 'Recording' : 'Replaying';
-        text = `${verb}: ${r.path} (${r.mode}, ${start}; author ${r.author}, game ${r.game}), recording frame ${r.recordingFrame} of ${r.totalFrames}, undo count ${r.undoCount}, ${at}`;
+        text = `${verb}: ${r.path} (${r.mode}, ${start}; author ${r.author}, game ${r.game}), ${frames}, undo count ${r.undoCount}, ${at}`;
       }
       return { content: [{ type: 'text' as const, text }] };
     }

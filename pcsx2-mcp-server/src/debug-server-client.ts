@@ -449,7 +449,8 @@ export class DebugServerClient {
     return {
       mode: resp.mode, path: resp.path, from: resp.from, savestate: resp.savestate, savestateExists: resp.savestate_exists,
       author: resp.author, game: resp.game, recordingFrame: resp.recording_frame, totalFrames: resp.total_frames,
-      undoCount: resp.undo_count, startingFrame: resp.starting_frame, stopped: resp.stopped, emulation: resp.emulation, frame: resp.frame,
+      undoCount: resp.undo_count, startingFrame: resp.starting_frame, stopped: resp.stopped, replayEnded: resp.replay_ended, endedAtFrame: resp.ended_at_frame,
+      emulation: resp.emulation, frame: resp.frame,
     };
   }
 }
@@ -468,6 +469,10 @@ export interface InputRecordingStatus {
   undoCount?: number;
   startingFrame?: number;
   stopped?: string;
+  /** The last replay started here reached its last frame and was closed there, unchanged. */
+  replayEnded?: boolean;
+  /** PCSX2's frame counter when that replay ended (status only). */
+  endedAtFrame?: number;
   emulation: string;
   frame: number;
 }

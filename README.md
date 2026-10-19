@@ -61,10 +61,16 @@ DebugServerPort = 21513
   takes `author` (required, as the menu's dialog requires it), `from` savestate (the current point: PCSX2 saves its
   start savestate beside the file as `<file>.p2m2_SaveState.p2s`, keeping one already there as `.bak`) or power_on
   (PCSX2 resets the game and records from boot), an optional `path` (default `recordings/mcp-<stamp>.p2m2`) and
-  `overwrite`. `play` takes `path` and loads its savestate (or resets the game) as the file says, then replays it;
-  PCSX2 pauses at its last frame and records on from there. `stop` closes it (while running, at the end of the
-  frame). `status` reports the mode (off, recording or replaying), file, start, author, game, recording frame, total
-  frames and undo count. A path is relative to PCSX2's data folder (a portable install's own folder): names of
+  `overwrite`. `play` takes `path` and loads its savestate (or resets the game) as the file says, then replays it.
+  At its last frame PCSX2 pauses, and the replay stops on its own there: the file is closed unchanged, the mode is
+  off and emulation stays paused, so playing a recording never adds to it (PCSX2 alone would switch to recording and
+  record on from there; a replay started from PCSX2's own menu still does). `stop` closes it (while running, at the
+  end of the frame) and answers the recording's total frames and the frame it stopped at; after a replay ended, it
+  answers that replay's numbers with `replay_ended`. `status` reports the mode (off, recording or replaying), file,
+  start, author, game, recording frame, total frames and undo count; while off after a replay ended, it says so
+  (`replay_ended`, the file, its frames and PCSX2's frame counter then) until the next `new` or `play`. The stop at
+  the end is a hook in PCSX2's per-frame input recording step (`DebugServer::EndInputRecordingReplay`, added by
+  the integration patch), which closes the file through PCSX2's own `stop` before that frame's input is handled. A path is relative to PCSX2's data folder (a portable install's own folder): names of
   letters, digits, `.`, `_` and `-` split by `/`, no `.` or `..`, and its real folder must lie inside; `.p2m2` is
   added when missing. Every frame's pad state is recorded, `pcsx2_controller`'s too. PCSX2's own menu does not see
   a recording started this way, so it still offers "New" and "Reset" while one runs.
