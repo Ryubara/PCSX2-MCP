@@ -56,7 +56,7 @@ index 2a99824..e6dfb11 100644
  	SettingsWrapEntry(RtcMonth);
  	SettingsWrapEntry(RtcDay);
 diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
-index 082d574..a81f1ac 100644
+index 082d574..98f861b 100644
 --- a/pcsx2/VMManager.cpp
 +++ b/pcsx2/VMManager.cpp
 @@ -26,6 +26,7 @@
@@ -99,7 +99,18 @@ index 082d574..a81f1ac 100644
  		UpdateDiscordPresence(s_state.load(std::memory_order_relaxed) == VMState::Initializing);
  		FileMcd_Reopen(memcardFilters.empty() ? s_disc_serial : memcardFilters);
  	}
-@@ -3808,6 +3813,19 @@ void VMManager::ReloadPINE()
+@@ -2980,7 +2985,9 @@ void VMManager::Internal::PollInputOnCPUThread()
+ 			g_InputRecording.getControls().processControlQueue();
+ 			// Increment our internal frame counter, used to keep track of when we hit the end, etc.
+ 			g_InputRecording.incFrameCounter();
+-			g_InputRecording.handleExceededFrameCounter();
++			// PCSX2-MCP's debug server closes a replay it started at its last frame instead of recording on
++			if (!DebugServer::EndInputRecordingReplay())
++				g_InputRecording.handleExceededFrameCounter();
+ 		}
+ 		// At this point, the PAD data has been read from the user for the current frame
+ 		// so we can either read from it, or overwrite it!
+@@ -3808,6 +3815,19 @@ void VMManager::ReloadPINE()
  		PINEServer::Initialize(EmuConfig.PINESlot);
  }
  

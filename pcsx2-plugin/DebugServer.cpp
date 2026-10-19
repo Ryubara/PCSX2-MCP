@@ -453,6 +453,19 @@ namespace DebugServer
 		return dir.size() == root.size() || dir[root.size()] == '/' || dir[root.size()] == '\\';
 	}
 
+	// A replay this server started and closes at its last frame (EndInputRecordingReplay), and the last one it closed
+	// that way. Used on the CPU thread only, like PCSX2's input recording itself.
+	struct EndedReplay
+	{
+		std::string path;
+		u32 frame = 0, totalFrames = 0; // the recording's frame it ended at, and its total frames
+		u32 endedAt = 0;                // g_FrameCount then
+	};
+	static bool s_replayStopsAtEnd = false;
+	static std::string s_replayPath;
+	static bool s_replayEnded = false;
+	static EndedReplay s_endedReplay;
+
 	// What PCSX2's input recording holds now; read on the CPU thread, which alone drives it.
 	struct InputRecordingState
 	{
@@ -460,23 +473,29 @@ namespace DebugServer
 		bool recording = false;
 		bool fromSavestate = false;
 		std::string path, author, game;
+		// While none is active, frame and totalFrames are the last recording's: PCSX2 keeps them after closing it
 		u32 frame = 0, totalFrames = 0, undoCount = 0, startingFrame = 0;
+		bool replayEnded = false; // the last replay this server started ended at its last frame and was closed
+		EndedReplay ended;
 	};
 
 	static InputRecordingState readInputRecording()
 	{
 		InputRecordingState s;
 		s.active = g_InputRecording.isActive();
+		const InputRecordingFile& file = g_InputRecording.getData();
+		s.frame = g_InputRecording.getFrameCounter();
+		s.totalFrames = file.getTotalFrames();
+		s.replayEnded = s_replayEnded;
+		if (s_replayEnded)
+			s.ended = s_endedReplay;
 		if (!s.active)
 			return s;
-		const InputRecordingFile& file = g_InputRecording.getData();
 		s.recording = g_InputRecording.getControls().isRecording();
 		s.fromSavestate = g_InputRecording.isTypeSavestate();
 		s.path = file.getFilename();
 		s.author = file.getAuthor();
 		s.game = file.getGameName();
-		s.frame = g_InputRecording.getFrameCounter();
-		s.totalFrames = file.getTotalFrames();
 		s.undoCount = file.getUndoCount();
 		s.startingFrame = g_InputRecording.getStartingFrame();
 		return s;
@@ -1459,8 +1478,10 @@ namespace DebugServer
 		// with "author" (required, as the menu's dialog requires it), "from" savestate (the current point: PCSX2 saves
 		// <file>_SaveState.p2s beside the recording, backing up one already there as .bak) or power_on (PCSX2 resets
 		// the game and records from boot); an existing recording is refused unless "overwrite". play: replay "path",
-		// which loads its start savestate or resets the game as the file says. stop: close it (PCSX2 closes it at the
-		// end of the current frame while running). status: what is active.
+		// which loads its start savestate or resets the game as the file says; at its last frame PCSX2 pauses and
+		// EndInputRecordingReplay closes it, where PCSX2 alone would record on. stop: close it (PCSX2 closes it at
+		// the end of the current frame while running) and answer its total frames and the frame it stopped at.
+		// status: what is active, or the replay that ended.
 		else if (cmd == "input_recording")
 		{
 			const std::string action = getStr(params, "action", "status");
@@ -1513,6 +1534,13 @@ namespace DebugServer
 				const bool savestate = from == "savestate";
 				if (!runOnCpuThread([action, path, savestate, author, started, readNow]() {
 						*started = action == "new" ? g_InputRecording.create(path, savestate, author) : g_InputRecording.play(path);
+						if (*started)
+						{
+							// A replay is closed at its last frame rather than recorded on (EndInputRecordingReplay)
+							s_replayStopsAtEnd = action == "play";
+							s_replayPath = g_InputRecording.getData().getFilename();
+							s_replayEnded = false;
+						}
 						readNow();
 					}, std::chrono::seconds(30)))
 					return errorJson("the CPU thread did not answer within 30 s");
@@ -1532,15 +1560,20 @@ namespace DebugServer
 				if (!runOnCpuThread([readNow]() {
 						readNow();
 						if (g_InputRecording.isActive())
+						{
+							s_replayStopsAtEnd = false;
+							s_replayEnded = false;
 							g_InputRecording.stop();
+						}
 					}))
 					return errorJson("the CPU thread did not answer within 5 s");
-				if (!now->active)
+				if (!now->active && !now->replayEnded)
 					return errorJson("no input recording is active");
-				const std::string stopped = now->path;
+				const bool endedBefore = !now->active;
+				const std::string stopped = endedBefore ? now->ended.path : now->path;
 				// While running PCSX2 closes the file at the end of the frame
 				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-				while (true)
+				while (!endedBefore)
 				{
 					if (!runOnCpuThread(readNow))
 						return errorJson("the CPU thread did not answer within 5 s");
@@ -1550,10 +1583,15 @@ namespace DebugServer
 				}
 				if (now->active)
 					return errorJson("PCSX2 closes the recording at the end of a frame, and none ended within 5 s (is the debugger holding emulation?): check with action status");
+				// The recording's final length and the frame it stopped at; a replay that reached its last frame was
+				// closed there already, and its numbers are the ones it ended with
 				j.startObject();
 				j.kv("ok", true);
 				j.kv("mode", "off");
 				j.kv("stopped", stopped);
+				j.kv("replay_ended", endedBefore);
+				j.kv("recording_frame", (int64_t)(endedBefore ? now->ended.frame : now->frame));
+				j.kv("total_frames", (int64_t)(endedBefore ? now->ended.totalFrames : now->totalFrames));
 				j.kv("emulation", vmStateName(VMManager::GetState()));
 				j.kv("frame", (int64_t)g_FrameCount);
 				j.endObject();
@@ -1584,6 +1622,15 @@ namespace DebugServer
 				j.kv("total_frames", (int64_t)now->totalFrames);
 				j.kv("undo_count", (int64_t)now->undoCount);
 				j.kv("starting_frame", (int64_t)now->startingFrame);
+			}
+			else if (now->replayEnded)
+			{
+				// The last replay this server started reached its last frame and was closed there, unchanged
+				j.kv("replay_ended", true);
+				j.kv("path", now->ended.path);
+				j.kv("recording_frame", (int64_t)now->ended.frame);
+				j.kv("total_frames", (int64_t)now->ended.totalFrames);
+				j.kv("ended_at_frame", (int64_t)now->ended.endedAt);
 			}
 			j.kv("emulation", vmStateName(VMManager::GetState()));
 			j.kv("frame", (int64_t)g_FrameCount);
@@ -1771,6 +1818,28 @@ namespace DebugServer
 	void OnBreakpointHit()
 	{
 		// Future: notify connected clients of breakpoint events
+	}
+
+	bool EndInputRecordingReplay()
+	{
+		if (!s_replayStopsAtEnd || !g_InputRecording.isActive() || !g_InputRecording.getControls().isReplaying())
+			return false;
+		const InputRecordingFile& file = g_InputRecording.getData();
+		if (file.getFilename() != s_replayPath)
+		{
+			// Not the replay this server started (stopped and another started from PCSX2's menu): leave it be
+			s_replayStopsAtEnd = false;
+			return false;
+		}
+		if (g_InputRecording.getFrameCounter() < file.getTotalFrames())
+			return false;
+		s_endedReplay = {s_replayPath, g_InputRecording.getFrameCounter(), file.getTotalFrames(), g_FrameCount};
+		s_replayEnded = true;
+		s_replayStopsAtEnd = false;
+		// PCSX2 has just paused at the last frame, so this closes the file now, before the frame's input is handled;
+		// should emulation still run, PCSX2 closes it at the start of the next frame, and until then it only reads.
+		g_InputRecording.stop();
+		return true;
 	}
 
 } // namespace DebugServer

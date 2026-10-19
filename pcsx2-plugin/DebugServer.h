@@ -40,4 +40,10 @@ namespace DebugServer
 	// Called when a breakpoint is hit — wakes up any waiting step/continue
 	void OnBreakpointHit();
 
+	// Called on the CPU thread each frame an input recording is active, after PCSX2 counted the frame and before it
+	// handles running past the recording's end. Closes a replay this server started once it reaches its last frame,
+	// so playing a recording never adds to it; returns true when it closed one (PCSX2 then skips switching the
+	// replay to recording).
+	bool EndInputRecordingReplay();
+
 } // namespace DebugServer
