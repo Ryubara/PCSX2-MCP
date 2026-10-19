@@ -51,6 +51,7 @@ typedef int socket_t;
 #include "MTGS.h"
 #include "GS/GS.h"
 #include "GS/GSCapture.h"
+#include "GS/GSDump.h"
 #include "GS/Renderers/Common/GSDevice.h"
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "common/FileSystem.h"
@@ -402,6 +403,32 @@ namespace DebugServer
 	// The file the running capture writes to, as this server started it ("" when none did).
 	static std::mutex s_captureLock;
 	static std::string s_capturePath;
+
+	// The last GS dump this server queued ("path" empty when none). PCSX2 starts a queued dump on the GS thread's
+	// next vsync and ends it once its frames have passed, so nothing moves while emulation is paused.
+	struct GsDump
+	{
+		std::string path;       // the dump file: the base name and the GSDumpCompression setting's extension
+		std::string screenshot; // the screenshot PCSX2 saves beside it
+		u32 frames = 0;
+		u32 queuedAt = 0;       // g_FrameCount when it was queued
+	};
+	static std::mutex s_gsDumpLock;
+	static GsDump s_gsDump;
+	static constexpr int64_t GS_DUMP_MAX_FRAMES = 300;
+
+	// Where a dump stands; called on the GS thread, which alone touches the renderer's dump. "dropped": PCSX2 did not
+	// take it (a screenshot or dump it had queued itself came first) or the GS thread closed before it began.
+	static const char* gsDumpState(const GsDump& d)
+	{
+		if (g_gs_renderer && g_gs_renderer->m_dump && g_gs_renderer->m_dump->GetPath() == d.path)
+			return "recording";
+		if (FileSystem::FileExists(d.path.c_str()))
+			return "done";
+		if (!g_gs_renderer || g_FrameCount >= d.queuedAt + 10)
+			return "dropped";
+		return "queued";
+	}
 
 	static std::string errorJson(const std::string& message)
 	{
@@ -1221,6 +1248,129 @@ namespace DebugServer
 			j.kv("frame", (int64_t)g_FrameCount);
 			j.endObject();
 		}
+		// ----- GS DUMP -----
+		// "action": start PCSX2's own GS dump (the .gs file its "Save Single/Multi Frame GS Dump" hotkeys make, with
+		// the GSDumpCompression setting's extension and PCSX2's screenshot beside it) for "frames" (1-300, default 1),
+		// or status of the last one. Start takes an optional "name" (as screenshot's, without extension; default
+		// PCSX2's own <title>_<serial>_<time>) in the snapshots folder. With "wait" (default true) and emulation
+		// running, start answers once the dump is written; paused, it stays queued until frames run.
+		else if (cmd == "gs_dump")
+		{
+			const std::string action = getStr(params, "action", "start");
+			if (action != "start" && action != "status")
+				return errorJson("action must be start or status");
+			const int64_t frames = getNum(params, "frames", 1);
+			if (action == "start")
+			{
+				if (frames < 1 || frames > GS_DUMP_MAX_FRAMES)
+					return errorJson("frames must be 1 to " + std::to_string(GS_DUMP_MAX_FRAMES));
+				std::string name;
+				if (!getStr(params, "name", "").empty())
+				{
+					name = fileName(params, "");
+					if (name.empty())
+						return errorJson(FILE_NAME_RULE);
+				}
+				if (!MTGS::IsOpen())
+					return errorJson("no game is running");
+				{
+					std::lock_guard<std::mutex> lock(s_gsDumpLock);
+					if (!s_gsDump.path.empty())
+					{
+						auto state = std::make_shared<std::string>("dropped");
+						const GsDump last = s_gsDump;
+						if (!runOnGsThread([state, last]() { *state = gsDumpState(last); }))
+							return errorJson("the GS thread did not answer within 5 s");
+						if (*state == "queued" || *state == "recording")
+							return errorJson("the last GS dump is still " + *state + ": let it finish (action status)");
+					}
+				}
+				// 0 queued, 1 PCSX2 is writing a dump of its own, 2 the file exists, 3 no renderer
+				struct Queued { int result = 3; GsDump dump; };
+				auto queued = std::make_shared<Queued>();
+				if (!runOnGsThread([queued, name, frames]() {
+						if (!g_gs_renderer)
+							return;
+						if (g_gs_renderer->m_dump)
+						{
+							queued->result = 1;
+							return;
+						}
+						FileSystem::CreateDirectoryPath(EmuFolders::Snapshots.c_str(), false);
+						const std::string base = name.empty() ? GSGetBaseSnapshotFilename() : Path::Combine(EmuFolders::Snapshots, name);
+						const char* ext = GSConfig.GSDumpCompression == GSDumpCompressionMethod::Uncompressed ? ".gs" :
+										  GSConfig.GSDumpCompression == GSDumpCompressionMethod::LZMA         ? ".gs.xz" :
+																												".gs.zst";
+						static constexpr const char* shotExt[] = {".png", ".jpg", ".webp"};
+						const u8 format = static_cast<u8>(GSConfig.ScreenshotFormat);
+						GsDump& d = queued->dump;
+						d.path = base + ext;
+						d.screenshot = base + (format < std::size(shotExt) ? shotExt[format] : ".png");
+						d.frames = (u32)frames;
+						d.queuedAt = g_FrameCount;
+						if (FileSystem::FileExists(d.path.c_str()))
+						{
+							queued->result = 2;
+							return;
+						}
+						// What the hotkeys call; a path ending in .png names the dump's base
+						GSQueueSnapshot(base + ".png", (u32)frames);
+						queued->result = 0;
+					}))
+					return errorJson("the GS thread did not answer within 5 s");
+				if (queued->result == 1)
+					return errorJson("PCSX2 is writing a GS dump of its own: let it finish first");
+				if (queued->result == 2)
+					return errorJson("the file exists already: " + queued->dump.path);
+				if (queued->result == 3)
+					return errorJson("no game is running");
+				std::lock_guard<std::mutex> lock(s_gsDumpLock);
+				s_gsDump = queued->dump;
+			}
+
+			GsDump dump;
+			{
+				std::lock_guard<std::mutex> lock(s_gsDumpLock);
+				dump = s_gsDump;
+			}
+			if (dump.path.empty())
+			{
+				j.startObject();
+				j.kv("ok", true);
+				j.kv("state", "none");
+				j.kv("frame", (int64_t)g_FrameCount);
+				j.endObject();
+				return j.str();
+			}
+			// Once the GS thread is gone, the file alone tells
+			auto state = std::make_shared<std::string>(FileSystem::FileExists(dump.path.c_str()) ? "done" : "dropped");
+			const auto readState = [&]() {
+				return !MTGS::IsOpen() || runOnGsThread([state, dump]() { *state = gsDumpState(dump); });
+			};
+			if (!readState())
+				return errorJson("the GS thread did not answer within 5 s");
+			// Waiting is worth it only while frames run: at least 20 a second, plus 5 s
+			if (action == "start" && getBool(params, "wait", true))
+			{
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dump.frames * 50 + 5000);
+				while ((*state == "queued" || *state == "recording") && VMManager::GetState() == VMState::Running &&
+					   std::chrono::steady_clock::now() < deadline)
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+					if (!readState())
+						return errorJson("the GS thread did not answer within 5 s");
+				}
+			}
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("state", *state);
+			j.kv("path", dump.path);
+			j.kv("screenshot", dump.screenshot);
+			j.kv("frames", (int64_t)dump.frames);
+			j.kv("emulation", vmStateName(VMManager::GetState()));
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -1237,7 +1387,7 @@ namespace DebugServer
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
 				"is_valid_address", "clear_breakpoints", "screenshot",
-				"controller", "frame_advance", "emulation", "capture"
+				"controller", "frame_advance", "emulation", "capture", "gs_dump"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();
