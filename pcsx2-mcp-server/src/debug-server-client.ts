@@ -421,4 +421,14 @@ export class DebugServerClient {
     if (!resp.ok) throw new Error(resp.error);
     return { capturing: resp.capturing, path: resp.path, video: resp.video, audio: resp.audio, elapsed: resp.elapsed, frame: resp.frame };
   }
+
+  /** Starts PCSX2's own GS dump of this many frames into its snapshots folder, or reports the last one. */
+  async gsDump(action: 'start' | 'status', frames = 1, name?: string, wait = true): Promise<{ state: 'none' | 'queued' | 'recording' | 'done' | 'dropped'; path?: string; screenshot?: string; frames?: number; emulation?: string; frame: number }> {
+    const cmd: Record<string, any> = action === 'start' ? { cmd: 'gs_dump', action, frames, wait } : { cmd: 'gs_dump', action };
+    if (action === 'start' && name) cmd.name = name;
+    // A waiting start takes up to 50 ms a frame plus 5 s on the server
+    const resp = await this.send(cmd, action === 'start' && wait ? frames * 50 + 15000 : 10000);
+    if (!resp.ok) throw new Error(resp.error);
+    return { state: resp.state, path: resp.path, screenshot: resp.screenshot, frames: resp.frames, emulation: resp.emulation, frame: resp.frame };
+  }
 }

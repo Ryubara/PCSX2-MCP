@@ -617,6 +617,35 @@ server.tool('pcsx2_capture', 'Start PCSX2\'s own video capture into its videos f
 );
 
 // ==========================================================
+//  TOOL: pcsx2_gs_dump
+// ==========================================================
+server.tool('pcsx2_gs_dump', 'Save PCSX2\'s own GS dump (the .gs file of its "Save Single/Multi Frame GS Dump" hotkeys, compressed as its settings choose, with its screenshot beside it) of N frames into its snapshots folder, or report the last one. PCSX2 starts the dump at the next frame and ends it after N, so while emulation is paused it stays queued: resume or pcsx2_frame_advance (about N + 5 frames: PCSX2 adds a few to close the dump), then call with action status. Returns the file\'s path and its state.',
+  {
+    action: z.enum(['start', 'status']).default('start'),
+    frames: z.number().int().min(1).max(300).default(1).describe('start only: frames to dump, 1-300'),
+    name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/).optional().describe('start only: file name without extension (.gs, .gs.xz or .gs.zst is added); default PCSX2\'s own <title>_<serial>_<time>'),
+    wait: z.boolean().default(true).describe('start only: while emulation runs, answer once the dump is written'),
+  },
+  async ({ action, frames, name, wait }) => {
+    if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
+    try {
+      const r = await debugServer!.gsDump(action, frames, name, wait);
+      const said: Record<string, string> = {
+        none: 'No GS dump started yet',
+        queued: 'GS dump queued: it starts at the next frame (resume or frame advance, then check with action status)',
+        recording: 'GS dump being written: let frames run, then check with action status',
+        done: 'GS dump saved',
+        dropped: 'GS dump not taken: PCSX2 had queued a screenshot or dump of its own, or the game closed',
+      };
+      const files = r.path ? `: ${r.path} (${r.frames} frame${r.frames === 1 ? '' : 's'}; screenshot ${r.screenshot})` : '';
+      const where = r.emulation ? `, emulation ${r.emulation}` : '';
+      return { content: [{ type: 'text' as const, text: `${said[r.state] ?? r.state}${files}${where}, at frame ${r.frame}` }], isError: r.state === 'dropped' };
+    }
+    catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+// ==========================================================
 //  PS2Recomp Integration Tools
 // ==========================================================
 server.tool('ps2recomp_lookup_function', 'Search PS2Recomp project for functions by address or name.',

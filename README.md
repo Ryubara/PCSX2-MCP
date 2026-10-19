@@ -49,6 +49,13 @@ DebugServerPort = 21513
   the file's path. Codec, size and sound come from PCSX2's capture settings. Only presented frames are recorded:
   none while paused, one per frame advanced. Commands now carry their own timeout in the MCP server, so a long
   `pcsx2_frame_advance` or a capture's stop is no longer cut off at 10 s.
+- `pcsx2_gs_dump` (debug server command `gs_dump`, `action` start or status, `frames` 1-300 (default 1), optional
+  `name` and `wait`) makes PCSX2's own GS dump, as its "Save Single/Multi Frame GS Dump" hotkeys do, into its
+  snapshots folder (by game when its settings say so), compressed as its GS dump setting chooses (`.gs`, `.gs.xz` or
+  `.gs.zst`), with its screenshot beside it; the default name is PCSX2's own. It returns both paths and the dump's
+  state: queued, recording, done, or dropped when PCSX2 did not take it. PCSX2 starts a dump at the next frame and
+  closes it a few frames after the last, so while running a start waits until it is written; while paused it stays
+  queued until frames run (resume, or advance about N + 5 frames), and `status` reports it.
 
 To build it, run `pcsx2-plugin\prepare.ps1` (it clones PCSX2 at a tag, adds the plugin, applies
 `pcsx2-plugin\pcsx2-integration.patch`, adds a `windows-msvc` CMake preset and unpacks PCSX2's prebuilt Windows
