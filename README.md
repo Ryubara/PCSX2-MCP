@@ -35,7 +35,9 @@ DebugServerPort = 21513
   change applies when a game starts or the settings are reloaded.
 - The port is claimed exclusively (`SO_EXCLUSIVEADDRUSE` on Windows): a second instance on the same port logs
   `[DebugServer] Failed to bind on port N` instead of sharing it.
-- The MCP server needs no change: `pcsx2_connect` takes `debug_port`.
+- `pcsx2_connect` takes `debug_port` and `pine_port`; their defaults are the environment variables `PCSX2_DEBUG_PORT` and
+  `PCSX2_PINE_PORT` when the MCP server starts with them (else 21512 and 28011), so a launcher that runs several
+  PCSX2 copies can point each assistant's server at its own copy.
 - The plugin builds against current PCSX2 (checked with `v2.9.129`).
 - `pcsx2_screenshot` (debug server command `screenshot`, optional `name`) saves the picture PCSX2 shows now,
   paused or running, as a PNG in its snapshots folder at internal resolution, and returns the file's path, so the

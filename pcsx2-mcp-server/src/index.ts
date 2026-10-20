@@ -27,6 +27,21 @@ let pine: PineClient | null = null;
 const memSnapshots = new Map<string, { addr: number; data: Buffer }>();
 const PS2RECOMP_ROOT = process.env.PS2RECOMP_ROOT || 'E:\\Programmi VARI\\PROGETTI\\PS2Recomp';
 
+// pcsx2_connect's default ports: PCSX2_DEBUG_PORT and PCSX2_PINE_PORT when set (a launcher that runs several PCSX2
+// copies, each on its own ports, points this server at one of them), else PCSX2's own defaults.
+function envPort(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value === '') return fallback;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`${name}=${value} is not a port (1-65535); using ${fallback}`);
+    return fallback;
+  }
+  return port;
+}
+const DEFAULT_DEBUG_PORT = envPort('PCSX2_DEBUG_PORT', 21512);
+const DEFAULT_PINE_PORT = envPort('PCSX2_PINE_PORT', 28011);
+
 // ===== Helpers =====
 function parseAddr(s: string): number { return parseInt(s.replace(/^0x/i, ''), 16); }
 
@@ -70,8 +85,8 @@ const server = new McpServer({ name: 'pcsx2-ultimate-debugger', version: '2.0.0'
 //  TOOL: pcsx2_connect
 // ==========================================================
 server.tool('pcsx2_connect',
-  'Connect to PCSX2. Tries DebugServer (21512), then Pine (28011). DebugServer gives FULL access (128-bit regs, expressions, conditional BP, native disasm). Pine gives memory + game info.',
-  { debug_port: z.number().default(21512).describe('DebugServer port'), pine_port: z.number().default(28011).describe('Pine IPC port'), mode: z.enum(['auto', 'debug', 'pine']).default('auto') },
+  `Connect to PCSX2. Tries DebugServer (${DEFAULT_DEBUG_PORT}), then Pine (${DEFAULT_PINE_PORT}). DebugServer gives FULL access (128-bit regs, expressions, conditional BP, native disasm). Pine gives memory + game info. The default ports come from PCSX2_DEBUG_PORT and PCSX2_PINE_PORT when the server was started with them.`,
+  { debug_port: z.number().default(DEFAULT_DEBUG_PORT).describe(`DebugServer port (default ${DEFAULT_DEBUG_PORT})`), pine_port: z.number().default(DEFAULT_PINE_PORT).describe(`Pine IPC port (default ${DEFAULT_PINE_PORT})`), mode: z.enum(['auto', 'debug', 'pine']).default('auto') },
   async ({ debug_port, pine_port, mode }) => {
     const results: string[] = [];
     // Try DebugServer
